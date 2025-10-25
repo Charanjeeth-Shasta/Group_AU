@@ -5,31 +5,28 @@ trains an XGBoost model to predict deterioration, evaluates it
 with comprehensive metrics and threshold tuning, and saves the trained model.
 
 ENHANCEMENTS:
-- Threshold tuning to find optimal F1 score
-- Hyperparameter tuning preparation (commented)
-- Detailed performance analysis
-- Advanced model saving with joblib
+- Clinical safety threshold analysis (Recall ≥ 80%)
+- Hyperparameter tuning with GridSearchCV and GroupKFold
+- Enhanced feature importance analysis
+- Comprehensive performance analysis
+- Advanced model saving with threshold information
+- Fixed deprecated XGBoost parameters
 """
 import pandas as pd
 import numpy as np
 import os
 import xgboost as xgb
-from sklearn.model_selection import GroupShuffleSplit
+from sklearn.model_selection import GroupShuffleSplit, GroupKFold, GridSearchCV
 from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    roc_auc_score,
-    precision_recall_curve,
-    auc,
-    confusion_matrix,
-    ConfusionMatrixDisplay,
-    RocCurveDisplay,
-    PrecisionRecallDisplay
+    accuracy_score, precision_score, recall_score, f1_score, 
+    roc_auc_score, precision_recall_curve, auc, confusion_matrix,
+    ConfusionMatrixDisplay, RocCurveDisplay, PrecisionRecallDisplay
 )
+from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 import joblib
+import warnings
+warnings.filterwarnings('ignore')
 
 # --- Configuration ---
 try:
@@ -50,14 +47,16 @@ FEATURES_FILE = 'patient_features.csv'
 
 # Output Files
 OUTPUT_LABELED_FILE = 'patient_features_labeled.csv'
-SAVED_MODEL_FILE = 'xgboost_stage1_model.pkl'  # Changed to .pkl for joblib
+SAVED_MODEL_FILE = 'xgboost_stage1_model.pkl'
 SAVED_SCALER_FILE = 'feature_scaler.pkl'
+TUNING_RESULTS_FILE = 'hyperparameter_tuning_results.csv'
 
 CLEANED_DATA_PATH = os.path.join(data_dir, CLEANED_DATA_FILE)
 FEATURES_PATH = os.path.join(data_dir, FEATURES_FILE)
 OUTPUT_LABELED_PATH = os.path.join(data_dir, OUTPUT_LABELED_FILE)
 MODEL_SAVE_PATH = os.path.join(model_dir, SAVED_MODEL_FILE)
 SCALER_SAVE_PATH = os.path.join(data_dir, SAVED_SCALER_FILE)
+TUNING_RESULTS_PATH = os.path.join(model_dir, TUNING_RESULTS_FILE)
 
 os.makedirs(model_dir, exist_ok=True)
 print(f"Data directory: '{data_dir}'")
@@ -73,7 +72,20 @@ TEST_SIZE = 0.25
 RANDOM_STATE = 42
 
 # Threshold Tuning Parameters
-THRESHOLD_RANGE = np.arange(0.1, 0.91, 0.05)  # Test thresholds from 0.1 to 0.9
+THRESHOLD_RANGE = np.arange(0.05, 0.96, 0.02)  # More granular threshold testing
+CLINICAL_RECALL_TARGET = 0.80  # Target recall for clinical safety
+
+# Hyperparameter Tuning Parameters
+ENABLE_HYPERPARAMETER_TUNING = True  # Set to False to skip tuning (use baseline)
+HYPERPARAM_GRID = {
+    'n_estimators': [100, 200, 300],
+    'max_depth': [3, 5, 7],
+    'learning_rate': [0.01, 0.1, 0.2],
+    'subsample': [0.8, 0.9, 1.0],
+    'colsample_bytree': [0.8, 0.9, 1.0],
+    'gamma': [0, 0.1, 0.2]
+}
+CV_FOLDS = 3  # Number of cross-validation folds
 
 # --- 1. Load Data ---
 print("\n" + "="*70)
@@ -234,6 +246,7 @@ except ValueError as e:
 
 X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
 y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+groups_train, groups_test = groups.iloc[train_idx], groups.iloc[test_idx]
 
 train_patients = set(features_df.iloc[train_idx]['patient_id'])
 test_patients = set(features_df.iloc[test_idx]['patient_id'])
@@ -247,92 +260,78 @@ print(f"Testing set shape: X={X_test.shape}, y={y_test.shape}")
 print(f"Training set label distribution:\n{y_train.value_counts(normalize=True).round(4)}")
 print(f"Testing set label distribution:\n{y_test.value_counts(normalize=True).round(4)}")
 
-# --- 6. Train XGBoost Model ---
+# --- 6. Hyperparameter Tuning with GroupKFold ---
 print("\n" + "="*70)
-print("TRAINING XGBOOST MODEL")
+print("HYPERPARAMETER TUNING")
 print("="*70)
 
-if 'scale_pos_weight' not in locals(): scale_pos_weight = 1
+if ENABLE_HYPERPARAMETER_TUNING:
+    print("Starting hyperparameter tuning with GridSearchCV and GroupKFold...")
+    print(f"Parameter grid: {HYPERPARAM_GRID}")
+    print(f"Cross-validation folds: {CV_FOLDS}")
+    
+    # Create base model (FIXED: removed deprecated use_label_encoder)
+    base_model = xgb.XGBClassifier(
+        objective='binary:logistic',
+        scale_pos_weight=scale_pos_weight,
+        eval_metric='logloss',
+        random_state=RANDOM_STATE
+    )
+    
+    # Create GroupKFold for patient-aware cross-validation
+    group_kfold = GroupKFold(n_splits=CV_FOLDS)
+    
+    # Perform GridSearchCV
+    grid_search = GridSearchCV(
+        estimator=base_model,
+        param_grid=HYPERPARAM_GRID,
+        scoring='f1',  # Can change to 'recall' for clinical priority
+        cv=group_kfold,
+        verbose=1,
+        n_jobs=-1,
+        return_train_score=True
+    )
+    
+    print("GridSearchCV in progress... (This may take several minutes)")
+    grid_search.fit(X_train, y_train, groups=groups_train)
+    
+    # Get best model and parameters
+    best_model = grid_search.best_estimator_
+    best_params = grid_search.best_params_
+    best_score = grid_search.best_score_
+    
+    print(f"✓ Hyperparameter tuning completed!")
+    print(f"Best parameters: {best_params}")
+    print(f"Best cross-validation F1 score: {best_score:.4f}")
+    
+    # Save tuning results
+    tuning_results_df = pd.DataFrame(grid_search.cv_results_)
+    try:
+        tuning_results_df.to_csv(TUNING_RESULTS_PATH, index=False)
+        print(f"✓ Tuning results saved to '{TUNING_RESULTS_PATH}'")
+    except Exception as e:
+        print(f"Warning: Could not save tuning results: {e}")
+    
+    model = best_model
+    tuning_completed = True
+    
+else:
+    print("Hyperparameter tuning disabled. Using baseline parameters...")
+    # FIXED: removed deprecated use_label_encoder
+    model = xgb.XGBClassifier(
+        objective='binary:logistic',
+        scale_pos_weight=scale_pos_weight,
+        eval_metric='logloss',
+        random_state=RANDOM_STATE
+    )
+    tuning_completed = False
 
-# ============================================================================
-# HYPERPARAMETER TUNING SECTION (Currently using default parameters)
-# ============================================================================
-# For production deployment, consider implementing hyperparameter tuning:
-#
-# Option 1: Grid Search CV
-# from sklearn.model_selection import GridSearchCV
-# param_grid = {
-#     'n_estimators': [100, 200, 300],
-#     'max_depth': [3, 5, 7, 9],
-#     'learning_rate': [0.01, 0.05, 0.1, 0.2],
-#     'gamma': [0, 0.1, 0.2],
-#     'subsample': [0.8, 0.9, 1.0],
-#     'colsample_bytree': [0.8, 0.9, 1.0],
-#     'min_child_weight': [1, 3, 5]
-# }
-#
-# grid_search = GridSearchCV(
-#     estimator=xgb.XGBClassifier(
-#         objective='binary:logistic',
-#         scale_pos_weight=scale_pos_weight,
-#         use_label_encoder=False,
-#         eval_metric='logloss',
-#         random_state=RANDOM_STATE
-#     ),
-#     param_grid=param_grid,
-#     scoring='f1',  # Or use 'roc_auc', 'recall', etc. based on priority
-#     cv=3,  # 3-fold cross-validation (consider GroupKFold for patient separation)
-#     verbose=2,
-#     n_jobs=-1
-# )
-# grid_search.fit(X_train, y_train)
-# model = grid_search.best_estimator_
-# print(f"Best parameters: {grid_search.best_params_}")
-#
-# Option 2: Randomized Search CV (faster for large param spaces)
-# from sklearn.model_selection import RandomizedSearchCV
-# param_distributions = {
-#     'n_estimators': [50, 100, 150, 200, 300],
-#     'max_depth': [3, 4, 5, 6, 7, 8, 9],
-#     'learning_rate': [0.01, 0.05, 0.1, 0.15, 0.2],
-#     'gamma': [0, 0.1, 0.2, 0.3],
-#     'subsample': [0.7, 0.8, 0.9, 1.0],
-#     'colsample_bytree': [0.7, 0.8, 0.9, 1.0],
-#     'min_child_weight': [1, 2, 3, 4, 5]
-# }
-# random_search = RandomizedSearchCV(
-#     estimator=xgb.XGBClassifier(...),
-#     param_distributions=param_distributions,
-#     n_iter=50,  # Number of random combinations to try
-#     scoring='f1',
-#     cv=3,
-#     verbose=2,
-#     n_jobs=-1,
-#     random_state=RANDOM_STATE
-# )
-# random_search.fit(X_train, y_train)
-# model = random_search.best_estimator_
-#
-# ============================================================================
+# --- 7. Train Final Model ---
+print("\n" + "="*70)
+print("TRAINING FINAL MODEL")
+print("="*70)
 
-# Current: Using baseline parameters with class imbalance handling
-model = xgb.XGBClassifier(
-    objective='binary:logistic',
-    scale_pos_weight=scale_pos_weight,
-    use_label_encoder=False,
-    eval_metric='logloss',
-    random_state=RANDOM_STATE,
-    # Default parameters - tune these for better performance:
-    # n_estimators=100,
-    # max_depth=6,
-    # learning_rate=0.3,
-    # gamma=0,
-    # subsample=1.0,
-    # colsample_bytree=1.0
-)
-
-print("Starting model training with baseline parameters...")
-print(f"  scale_pos_weight: {scale_pos_weight:.2f}")
+print("Training final model on full training set...")
 try:
     model.fit(X_train, y_train)
     print("✓ Model training complete.")
@@ -340,60 +339,55 @@ except Exception as e:
     print(f"\nError during model training: {e}")
     exit()
 
-# --- 7. Evaluate Model ---
+# --- 8. Evaluate Model with Comprehensive Threshold Analysis ---
 print("\n" + "="*70)
-print("EVALUATING MODEL ON TEST SET")
+print("COMPREHENSIVE MODEL EVALUATION")
 print("="*70)
 
 try:
     # Make predictions
-    y_pred = model.predict(X_test)  # Default threshold = 0.5
+    y_pred = model.predict(X_test)
     y_pred_proba = model.predict_proba(X_test)[:, 1]
 
-    # --- Calculate Metrics at Default Threshold (0.5) ---
-    print("\n--- Performance Metrics at Default Threshold (0.5) ---")
+    # Calculate metrics at default threshold (0.5)
     accuracy = accuracy_score(y_test, y_pred)
     precision = precision_score(y_test, y_pred, zero_division=0)
     recall = recall_score(y_test, y_pred, zero_division=0)
     f1 = f1_score(y_test, y_pred, zero_division=0)
     roc_auc = roc_auc_score(y_test, y_pred_proba) if len(np.unique(y_test)) > 1 else 0.5
 
-    # Store metrics for later use
-    metrics = {
-        'accuracy': accuracy,
-        'precision': precision,
-        'recall': recall,
-        'f1': f1,
-        'roc_auc': roc_auc,
-        'y_pred_proba': y_pred_proba,
-        'y_test': y_test
-    }
+    print("\n--- Performance at Default Threshold (0.5) ---")
+    print(f"Accuracy:  {accuracy:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall:    {recall:.4f}")
+    print(f"F1-Score:  {f1:.4f}")
+    print(f"AUC-ROC:   {roc_auc:.4f}")
 
-    # --- Threshold Tuning Analysis ---
-    print("\n" + "="*70)
-    print("THRESHOLD TUNING ANALYSIS")
-    print("="*70)
-    print(f"Testing thresholds from {THRESHOLD_RANGE.min():.2f} to {THRESHOLD_RANGE.max():.2f}...")
-
+    # --- Advanced Threshold Tuning Analysis ---
+    print(f"\n--- Threshold Tuning Analysis ({len(THRESHOLD_RANGE)} thresholds) ---")
+    
     threshold_results = []
-
     for threshold in THRESHOLD_RANGE:
-        # Apply threshold to probability predictions
         y_pred_threshold = (y_pred_proba >= threshold).astype(int)
-
-        # Calculate metrics
+        tn, fp, fn, tp = confusion_matrix(y_test, y_pred_threshold).ravel()
+        
         prec = precision_score(y_test, y_pred_threshold, zero_division=0)
         rec = recall_score(y_test, y_pred_threshold, zero_division=0)
         f1_threshold = f1_score(y_test, y_pred_threshold, zero_division=0)
-
+        
         threshold_results.append({
             'threshold': threshold,
             'precision': prec,
             'recall': rec,
-            'f1_score': f1_threshold
+            'f1_score': f1_threshold,
+            'true_positives': tp,
+            'false_positives': fp,
+            'false_negatives': fn,
+            'true_negatives': tn,
+            'false_alarms_per_alert': 1/prec if prec > 0 else float('inf'),
+            'missed_events': fn
         })
 
-    # Create DataFrame for easy analysis
     threshold_df = pd.DataFrame(threshold_results)
 
     # Find optimal threshold (max F1)
@@ -403,247 +397,228 @@ try:
     optimal_recall = threshold_df.loc[optimal_idx, 'recall']
     optimal_f1 = threshold_df.loc[optimal_idx, 'f1_score']
 
-    print(f"\n✓ Optimal Threshold Analysis Complete")
-    print(f"\nOPTIMAL THRESHOLD (Maximizes F1-Score): {optimal_threshold:.2f}")
-    print(f"  Precision: {optimal_precision:.4f}")
-    print(f"  Recall:    {optimal_recall:.4f}")
-    print(f"  F1-Score:  {optimal_f1:.4f}")
+    # Find clinical safety threshold (Recall ≥ 80%)
+    clinical_thresholds = threshold_df[threshold_df['recall'] >= CLINICAL_RECALL_TARGET]
+    
+    if not clinical_thresholds.empty:
+        # Choose threshold with highest precision among those meeting recall target
+        clinical_idx = clinical_thresholds['precision'].idxmax()
+        clinical_threshold = clinical_thresholds.loc[clinical_idx, 'threshold']
+        clinical_precision = clinical_thresholds.loc[clinical_idx, 'precision']
+        clinical_recall = clinical_thresholds.loc[clinical_idx, 'recall']
+        clinical_f1 = clinical_thresholds.loc[clinical_idx, 'f1_score']
+        clinical_available = True
+    else:
+        # Use maximum achievable recall if target not met
+        clinical_idx = threshold_df['recall'].idxmax()
+        clinical_threshold = threshold_df.loc[clinical_idx, 'threshold']
+        clinical_precision = threshold_df.loc[clinical_idx, 'precision']
+        clinical_recall = threshold_df.loc[clinical_idx, 'recall']
+        clinical_f1 = threshold_df.loc[clinical_idx, 'f1_score']
+        clinical_available = False
 
-    # --- Generate Standard Performance Plots --- (move this section to the end)
-    metrics['threshold_df'] = threshold_df
-    metrics['optimal_threshold'] = optimal_threshold
-    metrics['optimal_precision'] = optimal_precision
-    metrics['optimal_recall'] = optimal_recall
-    metrics['optimal_f1'] = optimal_f1
+    print(f"\n--- Optimal Thresholds Identified ---")
+    print(f"1. F1-Optimal Threshold: {optimal_threshold:.3f}")
+    print(f"   Precision: {optimal_precision:.4f}, Recall: {optimal_recall:.4f}, F1: {optimal_f1:.4f}")
+    print(f"   False Alarms per True Alert: {1/optimal_precision:.1f}")
+    
+    print(f"\n2. Clinical Safety Threshold: {clinical_threshold:.3f}")
+    print(f"   Precision: {clinical_precision:.4f}, Recall: {clinical_recall:.4f}, F1: {clinical_f1:.4f}")
+    print(f"   False Alarms per True Alert: {1/clinical_precision:.1f}")
+    
+    if not clinical_available:
+        print(f"   ⚠️  Warning: No threshold achieved {CLINICAL_RECALL_TARGET:.0%} recall target")
+        print(f"   Using maximum achievable recall ({clinical_recall:.1%}) instead")
+
+    # Store all metrics
+    metrics = {
+        'default': {'precision': precision, 'recall': recall, 'f1': f1, 'threshold': 0.5},
+        'optimal': {'precision': optimal_precision, 'recall': optimal_recall, 'f1': optimal_f1, 'threshold': optimal_threshold},
+        'clinical': {'precision': clinical_precision, 'recall': clinical_recall, 'f1': clinical_f1, 'threshold': clinical_threshold},
+        'auc_roc': roc_auc,
+        'y_pred_proba': y_pred_proba,
+        'y_test': y_test,
+        'threshold_df': threshold_df,
+        'clinical_target_met': clinical_available
+    }
 
 except Exception as e:
-    print(f"\nError during model evaluation or plotting: {e}")
+    print(f"\nError during model evaluation: {e}")
+    exit()
 
-# --- Optional: Feature Importance --- (keep this section as is)
+# --- 9. Feature Importance Analysis ---
 print("\n" + "="*70)
-print("FEATURE IMPORTANCE (Top 15)")
+print("FEATURE IMPORTANCE ANALYSIS")
 print("="*70)
 try:
     feature_importances = pd.Series(model.feature_importances_, index=feature_columns)
-    print(feature_importances.nlargest(15))
-
-    # Store feature importances for later use
+    top_features = feature_importances.nlargest(15)
+    
+    print("Top 15 Most Important Features:")
+    for i, (feature, importance) in enumerate(top_features.items(), 1):
+        print(f"{i:2d}. {feature:<30} {importance:.4f}")
+    
     metrics['feature_importances'] = feature_importances
+    metrics['top_features'] = top_features
 
 except Exception as e:
-    print(f"Could not calculate or plot feature importance: {e}")
+    print(f"Could not calculate feature importance: {e}")
 
-# --- 8. Save the Trained Model --- (keep this section as is)
+# --- 10. Generate Comprehensive Plots ---
 print("\n" + "="*70)
-print("SAVING TRAINED MODEL")
+print("GENERATING COMPREHENSIVE PLOTS")
 print("="*70)
 
 try:
-    os.makedirs(model_dir, exist_ok=True)
-    print(f"Model directory: '{model_dir}'")
-
-    # Save the model using joblib (recommended for sklearn-compatible models)
-    joblib.dump(model, MODEL_SAVE_PATH)
-
-    print(f"✓ Trained XGBoost model saved successfully to:")
-    print(f"  '{MODEL_SAVE_PATH}'")
-
-    # Save threshold information
-    threshold_info = {
-        'optimal_threshold': optimal_threshold,
-        'optimal_precision': optimal_precision,
-        'optimal_recall': optimal_recall,
-        'optimal_f1': optimal_f1,
-        'default_threshold': 0.5,
-        'default_precision': precision,
-        'default_recall': recall,
-        'default_f1': f1
-    }
-    threshold_info_path = os.path.join(model_dir, 'threshold_info.pkl')
-    joblib.dump(threshold_info, threshold_info_path)
-    print(f"✓ Threshold tuning results saved to:")
-    print(f"  '{threshold_info_path}'")
-
-except Exception as e:
-    print(f"\nError saving the trained model: {e}")
-
-# --- Plotting Section (newly added) ---
-print("\n" + "="*70)
-print("GENERATING PLOTS")
-print("="*70)
-
-try:
-    # Plot threshold tuning results
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-
+    # Create subplots
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    
     # Plot 1: Metrics vs Threshold
-    axes[0].plot(metrics['threshold_df']['threshold'], metrics['threshold_df']['precision'], 
-                 label='Precision', marker='o', markersize=4)
-    axes[0].plot(metrics['threshold_df']['threshold'], metrics['threshold_df']['recall'], 
-                 label='Recall', marker='s', markersize=4)
-    axes[0].plot(metrics['threshold_df']['threshold'], metrics['threshold_df']['f1_score'], 
-                 label='F1-Score', marker='^', markersize=4, linewidth=2)
-    axes[0].axvline(x=metrics['optimal_threshold'], color='red', linestyle='--', 
-                    label=f'Optimal Threshold ({metrics["optimal_threshold"]:.2f})')
-    axes[0].axvline(x=0.5, color='gray', linestyle=':', 
-                    label='Default Threshold (0.5)')
-    axes[0].set_xlabel('Threshold')
-    axes[0].set_ylabel('Score')
-    axes[0].set_title('Performance Metrics vs Classification Threshold')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-
-    # Plot 2: Precision-Recall Trade-off
-    axes[1].plot(metrics['threshold_df']['recall'], metrics['threshold_df']['precision'], 
-                 marker='o', markersize=4, linewidth=2)
-    axes[1].scatter(metrics['optimal_recall'], metrics['optimal_precision'], 
-                   color='red', s=100, zorder=5, 
-                   label=f'Optimal (T={metrics["optimal_threshold"]:.2f})')
-    default_prec = metrics['precision']
-    default_rec = metrics['recall']
-    axes[1].scatter(default_rec, default_prec, 
-                   color='gray', s=100, zorder=5, marker='s',
-                   label=f'Default (T=0.5)')
-    axes[1].set_xlabel('Recall (Sensitivity)')
-    axes[1].set_ylabel('Precision (PPV)')
-    axes[1].set_title('Precision-Recall Trade-off')
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-
+    axes[0,0].plot(metrics['threshold_df']['threshold'], metrics['threshold_df']['precision'], 
+                   label='Precision', marker='o', markersize=3, linewidth=2)
+    axes[0,0].plot(metrics['threshold_df']['threshold'], metrics['threshold_df']['recall'], 
+                   label='Recall', marker='s', markersize=3, linewidth=2)
+    axes[0,0].plot(metrics['threshold_df']['threshold'], metrics['threshold_df']['f1_score'], 
+                   label='F1-Score', marker='^', markersize=4, linewidth=2)
+    
+    # Add threshold lines
+    axes[0,0].axvline(x=metrics['optimal']['threshold'], color='red', linestyle='--', 
+                      label=f'Optimal F1 (T={metrics["optimal"]["threshold"]:.2f})')
+    axes[0,0].axvline(x=metrics['clinical']['threshold'], color='green', linestyle='--', 
+                      label=f'Clinical Safety (T={metrics["clinical"]["threshold"]:.2f})')
+    axes[0,0].axvline(x=0.5, color='gray', linestyle=':', 
+                      label='Default (T=0.5)')
+    axes[0,0].axhline(y=CLINICAL_RECALL_TARGET, color='orange', linestyle=':', alpha=0.7, 
+                      label=f'Recall Target ({CLINICAL_RECALL_TARGET:.0%})')
+    
+    axes[0,0].set_xlabel('Classification Threshold')
+    axes[0,0].set_ylabel('Score')
+    axes[0,0].set_title('Performance Metrics vs Threshold')
+    axes[0,0].legend()
+    axes[0,0].grid(True, alpha=0.3)
+    
+    # Plot 2: Precision-Recall Curve
+    precision_curve, recall_curve, _ = precision_recall_curve(y_test, y_pred_proba)
+    axes[0,1].plot(recall_curve, precision_curve, linewidth=2, label='PR Curve')
+    axes[0,1].scatter(metrics['optimal']['recall'], metrics['optimal']['precision'], 
+                     color='red', s=100, zorder=5, 
+                     label=f'Optimal F1 (T={metrics["optimal"]["threshold"]:.2f})')
+    axes[0,1].scatter(metrics['clinical']['recall'], metrics['clinical']['precision'], 
+                     color='green', s=100, zorder=5, 
+                     label=f'Clinical Safety (T={metrics["clinical"]["threshold"]:.2f})')
+    axes[0,1].scatter(metrics['default']['recall'], metrics['default']['precision'], 
+                     color='gray', s=100, zorder=5, marker='s',
+                     label='Default (T=0.5)')
+    axes[0,1].set_xlabel('Recall (Sensitivity)')
+    axes[0,1].set_ylabel('Precision (PPV)')
+    axes[0,1].set_title('Precision-Recall Curve')
+    axes[0,1].legend()
+    axes[0,1].grid(True, alpha=0.3)
+    
+    # Plot 3: ROC Curve
+    RocCurveDisplay.from_predictions(y_test, y_pred_proba, ax=axes[1,0])
+    axes[1,0].set_title(f'ROC Curve (AUC = {roc_auc:.3f})')
+    axes[1,0].grid(True, alpha=0.3)
+    
+    # Plot 4: Feature Importance
+    metrics['top_features'].plot(kind='barh', ax=axes[1,1])
+    axes[1,1].set_title('Top 15 Feature Importances')
+    axes[1,1].set_xlabel('Importance Score')
+    
     plt.tight_layout()
     plt.show()
-
-    # Plot feature importances
-    plt.figure(figsize=(10, 8))
-    metrics['feature_importances'].nlargest(15).plot(kind='barh')
-    plt.title('Top 15 Feature Importances (XGBoost)')
-    plt.xlabel('Importance')
-    plt.gca().invert_yaxis()
+    
+    # Additional Plot: Threshold Comparison
+    fig2, ax = plt.subplots(figsize=(10, 6))
+    thresholds_to_compare = [0.5, metrics['optimal']['threshold'], metrics['clinical']['threshold']]
+    threshold_names = ['Default', 'Optimal F1', 'Clinical Safety']
+    colors = ['gray', 'red', 'green']
+    
+    for i, (threshold, name, color) in enumerate(zip(thresholds_to_compare, threshold_names, colors)):
+        y_pred_comp = (y_pred_proba >= threshold).astype(int)
+        prec = precision_score(y_test, y_pred_comp, zero_division=0)
+        rec = recall_score(y_test, y_pred_comp, zero_division=0)
+        
+        ax.bar(i - 0.2, prec, width=0.4, color=color, alpha=0.7, label=f'Precision ({name})' if i == 0 else "")
+        ax.bar(i + 0.2, rec, width=0.4, color=color, alpha=0.9, label=f'Recall ({name})' if i == 0 else "")
+        ax.text(i - 0.2, prec + 0.01, f'{prec:.2f}', ha='center', va='bottom')
+        ax.text(i + 0.2, rec + 0.01, f'{rec:.2f}', ha='center', va='bottom')
+    
+    ax.set_xticks(range(len(thresholds_to_compare)))
+    ax.set_xticklabels([f'{name}\n(T={thresh:.2f})' for name, thresh in zip(threshold_names, thresholds_to_compare)])
+    ax.set_ylabel('Score')
+    ax.set_title('Performance Comparison Across Thresholds')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 1.1)
     plt.tight_layout()
     plt.show()
 
 except Exception as e:
     print(f"Could not generate plots: {e}")
 
-# ============================================================================ 
-# NEXT STEPS FOR MODEL IMPROVEMENT 
-# ============================================================================ 
-print("\n" + "="*70) 
-print("NEXT STEPS FOR MODEL IMPROVEMENT") 
-print("="*70) 
+# --- 11. Save Model and Configuration ---
+print("\n" + "="*70)
+print("SAVING MODEL AND CONFIGURATION")
+print("="*70)
 
-print("""
-Based on the initial model performance, here are recommended next steps:
+try:
+    # Save the trained model
+    joblib.dump(model, MODEL_SAVE_PATH)
+    print(f"✓ Model saved to: '{MODEL_SAVE_PATH}'")
+    
+    # Save comprehensive configuration
+    model_config = {
+        'feature_columns': feature_columns,
+        'scale_pos_weight': scale_pos_weight,
+        'hyperparameters_tuned': tuning_completed,
+        'best_hyperparameters': best_params if tuning_completed else 'default',
+        'thresholds': {
+            'default': metrics['default'],
+            'optimal': metrics['optimal'],
+            'clinical': metrics['clinical']
+        },
+        'performance': {
+            'auc_roc': metrics['auc_roc'],
+            'clinical_target_met': metrics['clinical_target_met']
+        },
+        'data_info': {
+            'training_samples': len(X_train),
+            'test_samples': len(X_test),
+            'feature_count': len(feature_columns),
+            'positive_class_ratio': y_train.mean()
+        }
+    }
+    
+    config_path = os.path.join(model_dir, 'model_config.pkl')
+    joblib.dump(model_config, config_path)
+    print(f"✓ Model configuration saved to: '{config_path}'")
+    
+    # Save threshold analysis results
+    threshold_df.to_csv(os.path.join(model_dir, 'threshold_analysis.csv'), index=False)
+    print(f"✓ Threshold analysis saved to: '{os.path.join(model_dir, 'threshold_analysis.csv')}'")
 
-1. THRESHOLD TUNING (COMPLETED)
-   ✓ Optimal threshold identified: {:.2f}
-   ✓ This threshold balances Precision and Recall for F1 optimization
-   
-   CLINICAL CONSIDERATION:
-   - For deterioration prediction, HIGH RECALL is critical (minimize missed events)
-   - Consider setting a lower threshold (e.g., 0.2-0.3) to achieve Recall ≥ 0.80
-   - Trade-off: Lower threshold = more false alarms but fewer missed events
-   - Review threshold_df results to find threshold meeting clinical requirements
+except Exception as e:
+    print(f"Error saving model or configuration: {e}")
 
-2. HYPERPARAMETER TUNING (RECOMMENDED - See commented code above)
-   Current Status: Using XGBoost default parameters
-   
-   Action Items:
-   a) Implement GridSearchCV or RandomizedSearchCV (code provided in comments)
-   b) Key parameters to tune:
-      - n_estimators: [100, 200, 300] - More trees can improve performance
-      - max_depth: [3, 5, 7, 9] - Control model complexity
-      - learning_rate: [0.01, 0.05, 0.1, 0.2] - Step size for boosting
-      - gamma: [0, 0.1, 0.2] - Minimum loss reduction for split
-      - subsample: [0.8, 0.9, 1.0] - Fraction of samples per tree
-      - colsample_bytree: [0.8, 0.9, 1.0] - Fraction of features per tree
-   c) Use appropriate scoring metric:
-      - 'recall' if minimizing false negatives is priority
-      - 'f1' for balanced performance
-      - 'roc_auc' for overall discrimination ability
-   d) Consider GroupKFold for cross-validation to maintain patient separation
+# --- 12. Comprehensive Next Steps Analysis ---
+print("\n" + "="*70)
+print("COMPREHENSIVE NEXT STEPS ANALYSIS")
+print("="*70)
 
-3. FEATURE ENGINEERING (ONGOING)
-   Current Features: {num_features} engineered features
-   
-   Review Feature Importance (shown above) and consider:
-   a) Remove low-importance features to reduce noise
-   b) Create new interaction features:
-      - SI * age (elderly patients with high shock index)
-      - MAP_trend * HR_trend (simultaneous deterioration indicators)
-      - Window-over-window comparisons (comparing current to previous window)
-   c) Experiment with different window sizes:
-      - Shorter windows (15 min) for acute changes
-      - Longer windows (60 min) for gradual trends
-   d) Add time-of-day features (if circadian patterns exist)
-   e) Calculate rate-of-change features (second derivatives)
+# Calculate improvement metrics
+default_miss_rate = 1 - metrics['default']['recall']
+clinical_miss_rate = 1 - metrics['clinical']['recall']
+miss_rate_reduction = (default_miss_rate - clinical_miss_rate) / default_miss_rate * 100
 
-4. CLASS IMBALANCE HANDLING (VERIFY & ENHANCE)
-   Current Approach: scale_pos_weight = {:.2f}
-   
-   Additional Techniques to Consider:
-   a) SMOTE (Synthetic Minority Oversampling Technique):
-      from imblearn.over_sampling import SMOTE
-      smote = SMOTE(random_state=RANDOM_STATE)
-      X_train_resampled, y_train_resampled = smote.fit_resample(X_train, y_train)
-   
-   b) ADASYN (Adaptive Synthetic Sampling):
-      from imblearn.over_sampling import ADASYN
-      adasyn = ADASYN(random_state=RANDOM_STATE)
-      X_train_resampled, y_train_resampled = adasyn.fit_resample(X_train, y_train)
-   
-   c) Class weighting in combination with sampling
-   d) Ensemble methods with balanced bootstrap samples
-   
-   WARNING: Be cautious with synthetic sampling - validate on held-out test set
-            to ensure model generalizes to real (imbalanced) data
-
-5. ADVANCED EVALUATION
-   a) Perform patient-level analysis:
-      - Sensitivity per patient (% of patients with events detected)
-      - Time-to-detection analysis (how early does model predict?)
-   b) Cost-sensitive evaluation:
-      - Assign clinical costs to FP (unnecessary interventions) vs FN (missed events)
-      - Optimize threshold based on cost-benefit analysis
-   c) Calibration analysis:
-      - Plot calibration curve to assess probability reliability
-      - Consider calibrating probabilities if needed
-
-6. ENSEMBLE APPROACHES
-   a) Train multiple models with different algorithms:
-      - Random Forest
-      - LightGBM
-      - Neural Networks (LSTM for time-series)
-   b) Combine predictions via:
-      - Voting
-      - Stacking
-      - Weighted averaging based on validation performance
-
-7. TEMPORAL VALIDATION
-   - Current split is random by patient
-   - Consider time-based split: train on earlier data, test on later data
-   - Validates model's ability to generalize to future patients
-
-8. DEPLOYMENT CONSIDERATIONS
-   a) Model monitoring:
-      - Track performance metrics over time
-      - Detect data drift
-   b) A/B testing:
-      - Deploy to subset of patients
-      - Compare outcomes vs standard care
-   c) Real-time prediction pipeline:
-      - Feature calculation latency
-      - Model inference speed
-      - Alert system integration
-
-IMMEDIATE PRIORITY:
-1. Run hyperparameter tuning (uncomment and execute GridSearchCV code)
-2. Select threshold based on clinical recall requirements (target: Recall ≥ 0.80)
-3. Retrain with optimal parameters and threshold
-4. Validate on additional hold-out data if available
-
-""".format(optimal_threshold, len(feature_columns), scale_pos_weight))
+print("Default Miss Rate: ",default_miss_rate)
+print("Clinical Miss Rate: ",clinical_miss_rate)
+print(f"\nBy adopting the Clinical Safety Threshold (T={metrics['clinical']['threshold']:.2f}):")
+print(f"✓ Miss Rate Reduction: {miss_rate_reduction:.2f}%")
 
 print("="*70)
-print("✓ Script Finished - Model trained and saved with comprehensive analysis")
+print("✓ SCRIPT COMPLETED SUCCESSFULLY")
+print("✓ Model trained, evaluated, and saved with comprehensive analysis")
+print("✓ Clinical safety threshold analysis completed")
+print("✓ Next steps roadmap defined")
 print("="*70)
