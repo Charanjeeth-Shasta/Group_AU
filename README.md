@@ -67,10 +67,11 @@ Build a **conversational AI health assistant** powered by:
 
 ```mermaid
 graph TD;
-    A[User Input (Text/Voice)] --> B[Voice to Text (Whisper/Vosk)];
-    B --> C[Symptom Extraction using NLP/LLM];
-    C --> D[Disease Prediction Model (ML/XGBoost)];
-    D --> E[Ranked Diseases with Confidence Scores];
-    E --> F[GenAI Explanation + Next Steps];
-    F --> G[JSON Response + UI Chat Display];
-    G --> H[Optional Text-to-Speech Output];
+    A[User Input (Text)]-->B[Symptom Extraction Using LLM/NLP];
+    B-->C[Disease Prediction (ML/XGBoost)];
+    C-->D[Ranked Diseases with Confidence Score];
+    D-->E[Response EXplaination (LLM)];
+    E-->F[Output Validation(GuardRails)];
+    F-->G[JSON Response + UI Display];
+
+
