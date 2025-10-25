@@ -75,12 +75,33 @@ This alert is **proactive** (predicts the crisis), **high-fidelity** (it's not a
 ## 📂 Project Structure
 
 ```bash
-.
-├── 📄 app.py                   # The main Streamlit dashboard application
-├── 📄 genai_interpreter.py      # Contains all logic for calling the LLM and RAG
-├── 📄 mock_ml_engine.py          # A "mock" function that simulates the ML model
-├── 📄 patient_sim.csv          # The simulated patient data feed
-├── 📁 protocols/
-│   ├── 📄 B_RESP_DISTRESS.txt    # RAG knowledge base for respiratory distress
-│   └── 📄 A_SEPSIS.txt           # RAG knowledge base for sepsis
-└── 📄 requirements.txt         # All Python dependencies
+preventive-health-ai/
+├── README.md
+├── requirements.txt
+├── .env.example
+├── notebooks/
+│   ├── train_predict.ipynb
+│   └── rag_agent_demo.ipynb
+├── app/
+│   ├── main.py
+│   ├── agent.py
+│   ├── predict.py
+│   ├── rag.py
+│   ├── explain.py
+│   └── models/
+├── evidence/
+│   ├── nih_guidelines.md
+│   ├── openfda_snippets.json
+│   └── who_guidance.md
+├── data/
+│   └── raw/ (kaggle csvs)
+├── models/
+│   └── lightgbm_model.pkl
+├── scripts/
+│   └── index_evidence.py
+├── tests/
+│   ├── test_guardrails.py
+│   └── test_predict_integration.py
+├── ai_chat_logs/
+└── evaluation.md
+
