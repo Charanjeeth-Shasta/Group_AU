@@ -28,43 +28,38 @@ Build a **conversational AI health assistant** powered by:
 
 ## 🦠 Diseases Covered (Phase 1)
 
-| Disease | Severity | Reason | Dataset |
-|---------|----------|--------|--------|
-| Diabetes | Medium | High prevalence | ✅ Available |
-| Heart Disease | High | Critical & time-sensitive | ✅ Available |
-| Pneumonia | High | Rapid escalation | ✅ Available |
-| Malaria | Medium | Regionally significant | ✅ Available |
-| COVID-19 / Flu | Medium | Symptom-overlap challenges | ✅ Available |
-| Migraine | Low | Common misinterpretation | ✅ Available |
+| Disease        | Reason                     | Dataset     |
+| -------------- | -------------------------- | ----------- |
+| Diabetes       | High prevalence            | ✅ Available |
+| Heart Disease  | Critical & time-sensitive  | ✅ Available |
+| Pneumonia      | Rapid escalation           | ✅ Available |
+| COVID-19 / Flu | Symptom-overlap challenges | ✅ Available |
 
 ✅ (Optional) Phase 2: Depression/Anxiety classification
 
 ---
 
-## 📂 Datasets Used
+| Name                                | Use                                                | Source                                                                         |
+| ----------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------ |
+| PIMA Diabetes Dataset               | Predict diabetes probability from patient features | [Kaggle](https://www.kaggle.com/datasets/uciml/pima-indians-diabetes-database) |
+| UCI Cleveland Heart Disease Dataset | Predict heart disease risk from patient data       | [UCI/Kaggle](https://www.kaggle.com/datasets/ronitf/heart-disease-uci)         |
+| Pneumonia Symptoms Dataset          | Symptom mapping for pneumonia                      | [Kaggle](https://www.kaggle.com/datasets) (choose small public subset)         |
+| COVID-19 / Flu Symptoms Dataset     | Symptom mapping & viral infection prediction       | [Kaggle](https://www.kaggle.com/datasets) (COVID-19 & flu combined subset)     |
 
-| Name | Use | Source |
-|------|-----|--------|
-| Disease Symptom Prediction CSV | Multi-disease classification | Kaggle |
-| PIMA Diabetes | Diabetes probability | Kaggle |
-| UCI Cleveland Heart Disease | Heart issues | UCI/Kaggle |
-| Malaria & Pneumonia Symptoms CSV | Symptom mapping | Kaggle |
-| COVID-19 vs Flu Data | Viral infections | Kaggle |
 
 ✅ All dataset links will be provided in `/datasets/README.md`
 
 ---
 
-## 🤖 AI Models Used
+| Component                                | Model / Approach                                                                             | Guardrails & Evaluation                                                                                                 |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Symptom → Disease Prediction             | Random Forest / XGBoost (Tabular datasets: Diabetes, Heart Disease, Pneumonia, COVID-19/Flu) | ✅ Feature validation, handle missing values, prevent unrealistic inputs                                                 |
+| Symptom Interpretation / Understanding   | LLM (Llama 3 / Gemma-Instruct)                                                               | ✅ Prompt guardrails to avoid hallucinations; validation with real symptom data                                          |
+| Generative Explanation & Recommendations | LLM (Llama 3) + **Guardrails**                                                               | ✅ Output filtered through Guardrails to prevent harmful advice; evaluation using test cases / expert-approved templates |
+| Voice Input (Optional)                   | Whisper / Vosk                                                                               | ✅ Audio preprocessing checks (noise, length)                                                                            |
+| Speech Output (Optional)                 | gTTS / Coqui TTS                                                                             | ✅ Ensure clarity & appropriate phrasing                                                                                 |
+| Overall System Evaluation                | –                                                                                            | ✅ Accuracy metrics (Precision/Recall), ✅ Confusion Matrix, ✅ Risk-based test cases, ✅ User-safety validation            |
 
-| Component | Model |
-|-----------|-------|
-| Symptom → Disease | Random Forest / XGBoost |
-| Confidence Boost | Logistic Regression |
-| Symptoms Understanding | Llama 3 / Gemma-Instruct |
-| Response Generation | LLM (Gemini-Pro / Llama 3) |
-| Voice Input | Whisper / Vosk |
-| Speech Output | gTTS / Coqui TTS |
 
 ---
 
