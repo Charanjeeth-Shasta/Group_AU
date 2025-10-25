@@ -1,4 +1,4 @@
-# EarlyDoc AI - An AI-Powered Disease Prediction & Diagnosis Assistant
+# ICU Smart-Alert System
 
 A prototype predictive alert system that transforms noisy ICU data into proactive, actionable clinical insights using time-series analysis and Generative AI.
 
