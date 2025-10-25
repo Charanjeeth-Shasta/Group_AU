@@ -1,77 +1,86 @@
 # EarlyDoc AI - An AI-Powered Disease Prediction & Diagnosis Assistant
 
-## Overview
-
-Early detection of diseases is crucial in preventing severe health complications. However, many individuals struggle with:
-❌ Misinterpreting symptoms  
-❌ Limited access to medical professionals  
-❌ Slow self-research through unreliable sources  
-
-To solve this, we present an **AI-powered Generative Health Diagnosis Assistant** that:
-✅ Accepts user symptoms (Text/Voice)  
-✅ Predicts possible diseases with confidence scores  
-✅ Generates human-like explanations using GenAI  
-✅ Suggests next steps (tests, urgency, doctor type)  
-✅ Outputs structured JSON (API friendly)
+A prototype predictive alert system that transforms noisy ICU data into proactive, actionable clinical insights using time-series analysis and Generative AI.
 
 ---
 
-## 🎯 Objective
+## 🔴 The Problem: Alarm Fatigue
 
-Build a **conversational AI health assistant** powered by:
-📊 Machine Learning (Symptom → Disease Prediction)  
-🧠 LLM-based Explanation Generation  
-🎙️ Voice Input + TTS Output  
-📂 JSON-structured response for scalability  
+In a modern ICU, the problem isn't a lack of data; it's **alarm fatigue**. Current systems are:
 
----
+* **Noisy (High False Positives):** A patient's heart rate spike from a simple cough triggers the same alarm as a cardiac event. Nurses become desensitized and may miss a real crisis.
+* **Late (Reactive):** Alarms only trigger *after* a vital sign has breached a critical threshold (e.g., SpO2 is already < 88%). The crisis is already in progress.
+* **"Dumb" (Univariate):** They look at each vital sign in isolation. A skilled nurse sees a rising heart rate, rising respiratory rate, and falling blood pressure together as an early sign of sepsis. The system cannot.
 
-## 🦠 Diseases Covered (Phase 1)
+## 💡 Our Solution: The Two-Stage "Smart" Pipeline
 
-| Disease        | Reason                     | Dataset     |
-| -------------- | -------------------------- | ----------- |
-| Diabetes       | High prevalence            | ✅ Available |
-| Heart Disease  | Critical & time-sensitive  | ✅ Available |
-| Pneumonia      | Rapid escalation           | ✅ Available |
-| COVID-19 / Flu | Symptom-overlap challenges | ✅ Available |
+This project moves from reactive alarms to **proactive, predictive alerts**. It combines a time-series model with a RAG-powered GenAI layer.
 
-✅ (Optional) Phase 2: Depression/Anxiety classification
+### 🧠 Part 1: The ML Engine (The "Pattern Detector")
 
----
+This component analyzes a "sliding window" of patient data (e.g., the last 30 minutes) to find subtle, multivariate patterns that are known to precede a crisis.
 
-| Name                                | Use                                                | Source                                                                         |
-| ----------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------ |
-| PIMA Diabetes Dataset               | Predict diabetes probability from patient features | [Kaggle](https://www.kaggle.com/datasets/uciml/pima-indians-diabetes-database) |
-| UCI Cleveland Heart Disease Dataset | Predict heart disease risk from patient data       | [UCI/Kaggle](https://www.kaggle.com/datasets/ronitf/heart-disease-uci)         |
-| Pneumonia Symptoms Dataset          | Symptom mapping for pneumonia                      | [Kaggle](https://www.kaggle.com/datasets) (choose small public subset)         |
-| COVID-19 / Flu Symptoms Dataset     | Symptom mapping & viral infection prediction       | [Kaggle](https://www.kaggle.com/datasets) (COVID-19 & flu combined subset)     |
+* **Input:** A (simulated) real-time stream of vitals (HR, RR, SpO2, MAP, Temp).
+* **Process:** It doesn't just check the latest value. It analyzes the **trend and relationship** between vitals.
+* **Output:** When it detects a high-risk pattern (like early-stage sepsis or respiratory distress), it outputs a structured JSON alert.
 
+### 🤖 Part 2: The GenAI Layer (The "Clinical Interpreter")
 
-✅ All dataset links will be provided in `/datasets/README.md`
+The JSON alert from the ML engine is still "code." This GenAI layer translates that data into a human-readable, clinically relevant summary using **Retrieval-Augmented Generation (RAG)**.
+
+* **Input:** The JSON alert from Part 1 (e.g., `{"pattern": "B_RESP_DISTRESS", ...}`).
+* **Process (RAG):**
+    1.  **Retrieve:** The system uses the pattern to find the hospital's specific written protocol for that event (e.g., retrieves `respiratory_distress_protocol.txt`).
+    2.  **Augment:** It combines the real-time patient data (the JSON) with the retrieved protocol (the context).
+    3.  **Generate:** It feeds this rich prompt into an LLM (like Google's Gemini) to generate a concise, trustworthy SBAR note.
+* **Output:** An actionable alert for the nurse's dashboard.
 
 ---
 
-| Component                                | Model / Approach                                                                             | Guardrails & Evaluation                                                                                                 |
-| ---------------------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Symptom → Disease Prediction             | Random Forest / XGBoost (Tabular datasets: Diabetes, Heart Disease, Pneumonia, COVID-19/Flu) | ✅ Feature validation, handle missing values, prevent unrealistic inputs                                                 |
-| Symptom Interpretation / Understanding   | LLM (Llama 3 / Gemma-Instruct)                                                               | ✅ Prompt guardrails to avoid hallucinations; validation with real symptom data                                          |
-| Generative Explanation & Recommendations | LLM (Llama 3) + **Guardrails**                                                               | ✅ Output filtered through Guardrails to prevent harmful advice; evaluation using test cases / expert-approved templates |
-| Voice Input (Optional)                   | Whisper / Vosk                                                                               | ✅ Audio preprocessing checks (noise, length)                                                                            |
-| Speech Output (Optional)                 | gTTS / Coqui TTS                                                                             | ✅ Ensure clarity & appropriate phrasing                                                                                 |
-| Overall System Evaluation                | –                                                                                            | ✅ Accuracy metrics (Precision/Recall), ✅ Confusion Matrix, ✅ Risk-based test cases, ✅ User-safety validation            |
+## 🚀 Real-Time Walkthrough
 
+1.  **Data Stream:** A (simulated) patient's vitals are streaming in. All are technically "within normal limits," but the trend is worsening.
+    * `11:45 AM: HR: 98, RR: 22, SpO2: 96%` (No static alarm)
+    * `12:00 PM: HR: 110, RR: 26, SpO2: 93%` (Still no static alarm!)
+
+2.  **ML Engine Fires:** The ML model analyzes this 15-minute window, flags a match for **Pattern B: Respiratory Distress**, and sends its JSON alert.
+
+3.  **GenAI Layer Translates:** The LLM receives the JSON and retrieves the hospital's protocol. It instantly generates the SBAR note.
+
+4.  **Actionable Alert:** The nurse's dashboard, instead of a simple "HR HIGH" alarm, shows this:
+
+> **ALERT: Patient P-451 (Room 204B) - Potential Respiratory Distress**
+>
+> **Situation:** Patient is showing a 15-minute deteriorating trend consistent with early respiratory distress.
+> **Background:** Vitals have trended from HR 90 -> 110 bpm, Respiration 18 -> 26 breaths/min, and SpO2 97% -> 93%.
+> **Assessment:** This combined pattern indicates a high risk of an impending crisis, even though no single vital has breached a critical limit.
+> **Recommendation (Per Protocol 7.2):**
+> * Immediate tableside assessment.
+> * Order STAT arterial blood gas (ABG).
+> * Notify on-call respiratory therapist.
+
+This alert is **proactive** (predicts the crisis), **high-fidelity** (it's not a false alarm), and **actionable** (it tells the nurse exactly what to do).
 
 ---
 
-## ⚙️ System Architecture (Workflow Overview)
+## 🛠️ Tech Stack
 
-```mermaid
-graph TD;
-    A[User Input (Text)]-->B[Symptom Extraction Using LLM/NLP];
-    B-->C[Disease Prediction (ML/XGBoost)];
-    C-->D[Ranked Diseases with Confidence Score];
-    D-->E[Response EXplaination (LLM)];
-    E-->F[Output Validation(GuardRails)];
-    F-->G[JSON Response + UI Display];
+* **Frontend & Backend:** Streamlit
+* **GenAI / LLM:** Google Gemini API
+* **Simulation & Logic:** Python
+* **Data Handling:** Pandas
 
+---
 
+## 📂 Project Structure
+
+```bash
+.
+├── 📄 app.py                   # The main Streamlit dashboard application
+├── 📄 genai_interpreter.py      # Contains all logic for calling the LLM and RAG
+├── 📄 mock_ml_engine.py          # A "mock" function that simulates the ML model
+├── 📄 patient_sim.csv          # The simulated patient data feed
+├── 📁 protocols/
+│   ├── 📄 B_RESP_DISTRESS.txt    # RAG knowledge base for respiratory distress
+│   └── 📄 A_SEPSIS.txt           # RAG knowledge base for sepsis
+└── 📄 requirements.txt         # All Python dependencies
