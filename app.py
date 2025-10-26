@@ -15,13 +15,13 @@ from flask_socketio import SocketIO
 # --- 1. INITIALIZE APP AND SOCKETIO ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key!' 
-# Use eventlet as the async_mode
 socketio = SocketIO(app, async_mode='eventlet') 
 
-# --- Global variable to control the simulation loop ---
+# --- Global state variables ---
 simulation_running = False
+snooze_is_active = False # NEW: For manual snooze button
 
-# --- 2. CONFIGURATION & FILE PATHS (Same as before) ---
+# --- 2. CONFIGURATION & FILE PATHS ---
 try:
     parent_dir_context = os.path.dirname(os.path.abspath(__file__))
 except NameError:
@@ -40,9 +40,9 @@ SCALER_PATH = os.path.join(model_dir, SCALER_FILE)
 
 VITAL_COLUMNS = ['HR', 'RR', 'SpO2', 'MAP']
 WINDOW_SIZE = 30 
-OPTIMAL_THRESHOLD = 0.40 # You may want to raise this to 0.50 to reduce noise
+OPTIMAL_THRESHOLD = 0.49 # Your threshold
 
-# --- 3. HELPER FUNCTIONS (Copied from main.py) ---
+# --- 3. HELPER FUNCTIONS (No Changes) ---
 def calculate_features(window_df):
     """Calculates features for a single window."""
     if len(window_df) < WINDOW_SIZE: return {} 
@@ -76,10 +76,7 @@ def calculate_features(window_df):
     return features
 
 def create_json_alert(patient_id, window_end_time, raw_data_window, prediction_proba):
-    """
-    Generates the comprehensive JSON output for Stage 1.
-    (Includes the fix for JSON serialization)
-    """
+    """Generates the comprehensive JSON output for Stage 1."""
     last_row = raw_data_window.iloc[-1]
     first_row = raw_data_window.iloc[0]
     hr_trend_display = last_row['HR'] - first_row['HR']
@@ -95,10 +92,8 @@ def create_json_alert(patient_id, window_end_time, raw_data_window, prediction_p
         pattern_code = "RISK_HIGH_GENERIC"
         pattern_desc = "High-Risk Pattern Detected (Non-Specific)"
     json_output = {
-        "patient_id": str(patient_id),
-        "window_end_time": str(window_end_time),
-        "pattern_detected": str(pattern_code),
-        "pattern_description": str(pattern_desc),
+        "patient_id": str(patient_id), "window_end_time": str(window_end_time),
+        "pattern_detected": str(pattern_code), "pattern_description": str(pattern_desc),
         "risk_score_proba": float(round(prediction_proba, 4)),
         "analysis_window": f"{WINDOW_SIZE} minutes",
         "demographics": { "age": int(last_row['age']), "sex": str(last_row['sex']), "bmi": float(round(last_row['bmi'], 1)) },
@@ -107,17 +102,15 @@ def create_json_alert(patient_id, window_end_time, raw_data_window, prediction_p
     }
     return json_output
 
-# --- 4. LOAD MODELS ON STARTUP (Same as before) ---
+# --- 4. LOAD MODELS ON STARTUP (No Changes) ---
 print("Loading model and scaler... This may take a moment.")
 try:
     model = joblib.load(MODEL_PATH)
     scaler = joblib.load(SCALER_PATH)
     feature_cols_model = model.feature_names_in_.tolist()
-    
     df_sim = pd.read_csv(TEST_DATA_PATH)
     df_sim['time_dt'] = pd.to_datetime(df_sim['time'], format='%H:%M:%S', errors='coerce')
     df_sim = df_sim.dropna(subset=['time_dt'])
-    
     print(f"✓ Model, scaler, and test data loaded successfully for {len(df_sim)} rows.")
 except Exception as e:
     print(f"FATAL ERROR: Could not load model/scaler/data: {e}")
@@ -131,24 +124,38 @@ def index():
 
 @socketio.on('connect')
 def handle_connect():
+    global snooze_is_active
+    snooze_is_active = False # Reset snooze on new connection
     print('Client connected')
 
 @socketio.on('stop_simulation')
 def handle_stop_simulation():
-    """Handles the stop button click from the client."""
-    global simulation_running
+    global simulation_running, snooze_is_active
     simulation_running = False
+    snooze_is_active = False # Reset snooze on stop
     print("Simulation stop requested by client.")
+
+# --- NEW: Handler for the Snooze Button ---
+@socketio.on('snooze_clicked')
+def handle_snooze():
+    """Called when the user clicks the 'Snooze' button."""
+    global snooze_is_active
+    snooze_is_active = True
+    print("Alerts snoozed by user.")
+    # Tell the frontend to hide the button again
+    socketio.emit('deactivate_alarm')
 
 @socketio.on('start_simulation')
 def handle_start_simulation():
     """Runs the simulation loop in a background thread."""
-    global simulation_running
+    global simulation_running, snooze_is_active
     if simulation_running:
         print("Simulation already running.")
         return
         
     simulation_running = True
+    snooze_is_active = False # Reset snooze on start
+    
     print("Simulation requested... Starting loop.")
     socketio.emit('status_update', {'msg': 'Simulation started... Monitoring patient data.'})
     
@@ -156,12 +163,12 @@ def handle_start_simulation():
     patient_id = df_sim['patient_id'].iloc[0] if not df_sim.empty else "P-SIM-000"
 
     for end_index in range(len(df_sim)):
-        # --- CHECK FOR STOP COMMAND ---
         if not simulation_running:
             print("Simulation loop terminated.")
             socketio.emit('status_update', {'msg': 'Simulation Stopped by User.'})
+            socketio.emit('deactivate_alarm') # Hide snooze button
             socketio.emit('simulation_ended')
-            break # Exit the loop
+            break
             
         if end_index < WINDOW_SIZE - 1:
             continue
@@ -171,21 +178,17 @@ def handle_start_simulation():
         current_vitals = window_data.iloc[-1]
         window_end_time = current_vitals['time']
         
-        # --- UPDATE: Send FULL vital data on every tick for graphs ---
         vitals_data = {
             'time': window_end_time,
-            'hr': float(current_vitals['HR']),
-            'map': float(current_vitals['MAP']),
-            'rr': float(current_vitals['RR']),
-            'spo2': float(current_vitals['SpO2'])
+            'hr': float(current_vitals['HR']), 'map': float(current_vitals['MAP']),
+            'rr': float(current_vitals['RR']), 'spo2': float(current_vitals['SpO2'])
         }
         socketio.emit('simulation_tick', vitals_data)
 
         # --- Feature Engineering ---
         features_dict = calculate_features(window_data)
         X_live = pd.DataFrame([features_dict])
-        X_live['age'] = window_data['age'].iloc[-1]
-        X_live['bmi'] = window_data['bmi'].iloc[-1]
+        X_live['age'] = window_data['age'].iloc[-1]; X_live['bmi'] = window_data['bmi'].iloc[-1]
         X_live['sex_encoded'] = 1 if window_data['sex'].iloc[-1] == 'M' else 0 
         if 'sex' in X_live.columns: X_live = X_live.drop(columns=['sex'])
         X_live = X_live.reindex(columns=feature_cols_model, fill_value=0.0)
@@ -199,22 +202,35 @@ def handle_start_simulation():
         # --- Prediction ---
         prediction_proba = model.predict_proba(X_scaled)[:, 1][0]
         
+        # --- START OF UPGRADED SNOOZE LOGIC ---
         if prediction_proba >= OPTIMAL_THRESHOLD:
-            # --- Trigger Alert ---
-            print(f"ALERT: Triggered at {window_end_time} (P: {prediction_proba:.4f})")
-            triggered_alerts += 1
-            alert_json = create_json_alert(
-                patient_id, window_end_time, window_data, prediction_proba
-            )
-            socketio.emit('new_alert', alert_json)
-        
-        # --- SPEED CHANGE: Slowed down to 0.5 seconds ---
+            # High risk detected. Check if snoozed.
+            if not snooze_is_active:
+                # Not snoozed. Fire the alert.
+                print(f"ALERT: Triggered at {window_end_time} (P: {prediction_proba:.4f})")
+                triggered_alerts += 1
+                alert_json = create_json_alert(
+                    patient_id, window_end_time, window_data, prediction_proba
+                )
+                socketio.emit('new_alert', alert_json)
+                
+                # Tell the frontend to SHOW the snooze button
+                socketio.emit('activate_alarm')
+        else:
+            # Patient risk has dropped. Automatically reset the snooze.
+            if snooze_is_active:
+                print("Patient risk dropped. Resetting snooze.")
+            snooze_is_active = False
+            # Tell the frontend to HIDE the snooze button
+            socketio.emit('deactivate_alarm')
+        # --- END OF UPGRADED SNOOZE LOGIC ---
+            
         socketio.sleep(0.5) # 500ms per row
 
     if simulation_running:
-        # Only show "finished" if it wasn't stopped
         print(f"Simulation complete. Total alerts: {triggered_alerts}")
         socketio.emit('status_update', {'msg': f'Simulation Finished. Total alerts: {triggered_alerts}'})
+        socketio.emit('deactivate_alarm') # Hide snooze button
         socketio.emit('simulation_ended')
         simulation_running = False
 
