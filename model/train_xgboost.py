@@ -11,6 +11,8 @@ ENHANCEMENTS:
 - Comprehensive performance analysis
 - Advanced model saving with threshold information
 - Fixed deprecated XGBoost parameters
+- CORRECTED: Includes StandardScaler fit/transform/save
+- CORRECTED: Re-applies feature names after scaling for model training
 """
 import pandas as pd
 import numpy as np
@@ -55,7 +57,10 @@ CLEANED_DATA_PATH = os.path.join(data_dir, CLEANED_DATA_FILE)
 FEATURES_PATH = os.path.join(data_dir, FEATURES_FILE)
 OUTPUT_LABELED_PATH = os.path.join(data_dir, OUTPUT_LABELED_FILE)
 MODEL_SAVE_PATH = os.path.join(model_dir, SAVED_MODEL_FILE)
-SCALER_SAVE_PATH = os.path.join(data_dir, SAVED_SCALER_FILE)
+
+# --- FIX 1: Corrected Scaler Save Path ---
+# It should be saved to the 'model' directory, not 'data'
+SCALER_SAVE_PATH = os.path.join(model_dir, SAVED_SCALER_FILE) 
 TUNING_RESULTS_PATH = os.path.join(model_dir, TUNING_RESULTS_FILE)
 
 os.makedirs(model_dir, exist_ok=True)
@@ -260,6 +265,44 @@ print(f"Testing set shape: X={X_test.shape}, y={y_test.shape}")
 print(f"Training set label distribution:\n{y_train.value_counts(normalize=True).round(4)}")
 print(f"Testing set label distribution:\n{y_test.value_counts(normalize=True).round(4)}")
 
+
+# --- 5b. (FIX 2) Scale Features & Save Scaler ---
+print("\n" + "="*70)
+print("SCALING FEATURES & SAVING SCALER")
+print("="*70)
+
+print(f"Initializing StandardScaler...")
+scaler = StandardScaler()
+
+# CRITICAL: Fit scaler ONLY on X_train
+print(f"Fitting scaler on X_train (shape: {X_train.shape})...")
+scaler.fit(X_train)
+print("✓ Scaler fitted.")
+
+# Save the fitted scaler immediately to the correct path
+try:
+    joblib.dump(scaler, SCALER_SAVE_PATH)
+    print(f"✓ SCALER SAVED to: '{SCALER_SAVE_PATH}'")
+except Exception as e:
+    print(f"FATAL ERROR: Could not save scaler. Error: {e}")
+    print(f"Check permissions for directory: {model_dir}")
+    exit(1)
+
+# Now, transform both train and test sets
+print("Transforming X_train and X_test...")
+# scaler.transform() returns a NumPy array, stripping column names.
+X_train_scaled_np = scaler.transform(X_train)
+X_test_scaled_np = scaler.transform(X_test)
+
+# Convert back to DataFrame, adding feature names back.
+# This is CRITICAL for the model to learn the feature names.
+# 'feature_columns' was defined in Section 5
+X_train = pd.DataFrame(X_train_scaled_np, columns=feature_columns)
+X_test = pd.DataFrame(X_test_scaled_np, columns=feature_columns)
+
+print("✓ Feature scaling complete (DataFrames recreated with feature names).")
+
+
 # --- 6. Hyperparameter Tuning with GroupKFold ---
 print("\n" + "="*70)
 print("HYPERPARAMETER TUNING")
@@ -293,6 +336,7 @@ if ENABLE_HYPERPARAMETER_TUNING:
     )
     
     print("GridSearchCV in progress... (This may take several minutes)")
+    # We now pass the SCALED X_train DataFrame to fit
     grid_search.fit(X_train, y_train, groups=groups_train)
     
     # Get best model and parameters
@@ -331,8 +375,9 @@ print("\n" + "="*70)
 print("TRAINING FINAL MODEL")
 print("="*70)
 
-print("Training final model on full training set...")
+print("Training final model on full (SCALED) training set...")
 try:
+    # We fit the model on the SCALED X_train DataFrame
     model.fit(X_train, y_train)
     print("✓ Model training complete.")
 except Exception as e:
@@ -345,7 +390,7 @@ print("COMPREHENSIVE MODEL EVALUATION")
 print("="*70)
 
 try:
-    # Make predictions
+    # Make predictions using the SCALED X_test DataFrame
     y_pred = model.predict(X_test)
     y_pred_proba = model.predict_proba(X_test)[:, 1]
 
@@ -369,7 +414,15 @@ try:
     threshold_results = []
     for threshold in THRESHOLD_RANGE:
         y_pred_threshold = (y_pred_proba >= threshold).astype(int)
-        tn, fp, fn, tp = confusion_matrix(y_test, y_pred_threshold).ravel()
+        
+        # Handle cases with no positive predictions
+        if np.sum(y_pred_threshold) == 0:
+            tn = np.sum(y_test == 0)
+            fp = 0
+            fn = np.sum(y_test == 1)
+            tp = 0
+        else:
+            tn, fp, fn, tp = confusion_matrix(y_test, y_pred_threshold).ravel()
         
         prec = precision_score(y_test, y_pred_threshold, zero_division=0)
         rec = recall_score(y_test, y_pred_threshold, zero_division=0)
@@ -420,11 +473,13 @@ try:
     print(f"\n--- Optimal Thresholds Identified ---")
     print(f"1. F1-Optimal Threshold: {optimal_threshold:.3f}")
     print(f"   Precision: {optimal_precision:.4f}, Recall: {optimal_recall:.4f}, F1: {optimal_f1:.4f}")
-    print(f"   False Alarms per True Alert: {1/optimal_precision:.1f}")
+    if optimal_precision > 0:
+        print(f"   False Alarms per True Alert: {1/optimal_precision:.1f}")
     
     print(f"\n2. Clinical Safety Threshold: {clinical_threshold:.3f}")
     print(f"   Precision: {clinical_precision:.4f}, Recall: {clinical_recall:.4f}, F1: {clinical_f1:.4f}")
-    print(f"   False Alarms per True Alert: {1/clinical_precision:.1f}")
+    if clinical_precision > 0:
+        print(f"   False Alarms per True Alert: {1/clinical_precision:.1f}")
     
     if not clinical_available:
         print(f"   ⚠️  Warning: No threshold achieved {CLINICAL_RECALL_TARGET:.0%} recall target")
@@ -444,7 +499,7 @@ try:
 
 except Exception as e:
     print(f"\nError during model evaluation: {e}")
-    exit()
+    # exit() # Comment out exit to allow saving even if evaluation fails
 
 # --- 9. Feature Importance Analysis ---
 print("\n" + "="*70)
@@ -463,6 +518,8 @@ try:
 
 except Exception as e:
     print(f"Could not calculate feature importance: {e}")
+    metrics['feature_importances'] = None
+    metrics['top_features'] = None
 
 # --- 10. Generate Comprehensive Plots ---
 print("\n" + "="*70)
@@ -521,10 +578,14 @@ try:
     axes[1,0].grid(True, alpha=0.3)
     
     # Plot 4: Feature Importance
-    metrics['top_features'].plot(kind='barh', ax=axes[1,1])
-    axes[1,1].set_title('Top 15 Feature Importances')
-    axes[1,1].set_xlabel('Importance Score')
-    
+    if metrics['top_features'] is not None:
+        metrics['top_features'].plot(kind='barh', ax=axes[1,1])
+        axes[1,1].set_title('Top 15 Feature Importances')
+        axes[1,1].set_xlabel('Importance Score')
+    else:
+        axes[1,1].text(0.5, 0.5, 'Feature Importance failed', ha='center', va='center')
+        axes[1,1].set_title('Feature Importances')
+
     plt.tight_layout()
     plt.show()
     
@@ -574,13 +635,13 @@ try:
         'hyperparameters_tuned': tuning_completed,
         'best_hyperparameters': best_params if tuning_completed else 'default',
         'thresholds': {
-            'default': metrics['default'],
-            'optimal': metrics['optimal'],
-            'clinical': metrics['clinical']
+            'default': metrics.get('default'),
+            'optimal': metrics.get('optimal'),
+            'clinical': metrics.get('clinical')
         },
         'performance': {
-            'auc_roc': metrics['auc_roc'],
-            'clinical_target_met': metrics['clinical_target_met']
+            'auc_roc': metrics.get('auc_roc'),
+            'clinical_target_met': metrics.get('clinical_target_met')
         },
         'data_info': {
             'training_samples': len(X_train),
@@ -606,15 +667,22 @@ print("\n" + "="*70)
 print("COMPREHENSIVE NEXT STEPS ANALYSIS")
 print("="*70)
 
-# Calculate improvement metrics
-default_miss_rate = 1 - metrics['default']['recall']
-clinical_miss_rate = 1 - metrics['clinical']['recall']
-miss_rate_reduction = (default_miss_rate - clinical_miss_rate) / default_miss_rate * 100
+try:
+    # Calculate improvement metrics
+    default_miss_rate = 1 - metrics['default']['recall']
+    clinical_miss_rate = 1 - metrics['clinical']['recall']
+    
+    if default_miss_rate > 0:
+        miss_rate_reduction = (default_miss_rate - clinical_miss_rate) / default_miss_rate * 100
+    else:
+        miss_rate_reduction = 0.0
 
-print("Default Miss Rate: ",default_miss_rate)
-print("Clinical Miss Rate: ",clinical_miss_rate)
-print(f"\nBy adopting the Clinical Safety Threshold (T={metrics['clinical']['threshold']:.2f}):")
-print(f"✓ Miss Rate Reduction: {miss_rate_reduction:.2f}%")
+    print("Default Miss Rate: ",default_miss_rate)
+    print("Clinical Miss Rate: ",clinical_miss_rate)
+    print(f"\nBy adopting the Clinical Safety Threshold (T={metrics['clinical']['threshold']:.2f}):")
+    print(f"✓ Miss Rate Reduction: {miss_rate_reduction:.2f}%")
+except Exception as e:
+    print(f"Could not complete final analysis: {e}")
 
 print("="*70)
 print("✓ SCRIPT COMPLETED SUCCESSFULLY")

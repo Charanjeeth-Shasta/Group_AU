@@ -10,7 +10,7 @@ except ImportError:
 
 # ============ CONFIGURATION ============
 NUM_PATIENTS = 50                        # Number of patients to load (must be even)
-TARGET_DURATION_MINUTES = 180           # Exact duration per patient (3 hours)
+TARGET_DURATION_MINUTES = 180           # Exact duration per patient 
 TARGET_INTERVAL = 60                    # Sampling interval in seconds (1 minute)
 MIN_DURATION_MINUTES = TARGET_DURATION_MINUTES
 min_samples_per_patient = MIN_DURATION_MINUTES
@@ -35,7 +35,7 @@ track_names = [
 project_root = os.path.dirname(os.path.abspath(__file__))
 data_dir = os.path.join(project_root, "data")
 os.makedirs(data_dir, exist_ok=True)
-output_filename = os.path.join(data_dir, "patient_data.csv")
+output_filename = os.path.join(data_dir, "test_patient_data.csv")
 
 # Load clinical data from VitalDB API
 print("Loading clinical information from VitalDB...")
