@@ -1,6 +1,10 @@
 import pandas as pd
 import numpy as np
 import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 try:
     import vitaldb
@@ -37,10 +41,14 @@ data_dir = os.path.join(project_root, "data")
 os.makedirs(data_dir, exist_ok=True)
 output_filename = os.path.join(data_dir, "test_patient_data.csv")
 
+# Replace the API URL with environment variable
+VITALDB_API_URL = os.getenv('VITALDB_API_URL')
+VITALDB_API_KEY = os.getenv('VITALDB_API_KEY')
+
 # Load clinical data from VitalDB API
 print("Loading clinical information from VitalDB...")
 try:
-    clinical_df = pd.read_csv('https://api.vitaldb.net/cases')
+    clinical_df = pd.read_csv(f'{VITALDB_API_URL}{os.getenv("VITALDB_CASES_ENDPOINT")}')
     print(f"Loaded clinical data for {len(clinical_df)} cases\n")
 except Exception as e:
     print(f"Error loading clinical data: {e}")

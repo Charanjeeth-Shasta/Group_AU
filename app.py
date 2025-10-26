@@ -11,23 +11,41 @@ import joblib
 from sklearn.preprocessing import StandardScaler
 from flask import Flask, render_template
 from flask_socketio import SocketIO
+from dotenv import load_dotenv # New
+import google.generativeai as genai # New
 
-# --- 1. INITIALIZE APP AND SOCKETIO ---
+# --- 1. LOAD API KEY AND CONFIGURE LLM ---
+load_dotenv()
+API_KEY = os.environ.get("GEMINI_API_KEY")
+if not API_KEY:
+    print("="*80)
+    print("WARNING: GEMINI_API_KEY not found in .env file.")
+    print("LLM analysis will be disabled. Please create a .env file.")
+    print("="*80)
+else:
+    try:
+        genai.configure(api_key=API_KEY)
+        llm_model = genai.GenerativeModel('gemini-pro-latest')
+        print("✓ Gemini LLM Model loaded successfully.")
+    except Exception as e:
+        print(f"ERROR: Could not configure Gemini. Check API key. Error: {e}")
+
+# --- 2. INITIALIZE APP AND SOCKETIO ---
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key!' 
-socketio = SocketIO(app, async_mode='eventlet') 
+app.config['SECRET_KEY'] = 'your-secret-key!'
+socketio = SocketIO(app, async_mode='eventlet')
 
 # --- Global state variables ---
 simulation_running = False
-snooze_is_active = False # NEW: For manual snooze button
+snooze_is_active = False
 
-# --- 2. CONFIGURATION & FILE PATHS ---
+# --- 3. CONFIGURATION & FILE PATHS ---
 try:
     parent_dir_context = os.path.dirname(os.path.abspath(__file__))
 except NameError:
-     parent_dir_context = os.getcwd() 
+     parent_dir_context = os.getcwd()
 
-TEST_DATA_FILE = 'test_patient_data.csv' 
+TEST_DATA_FILE = 'test_patient_data.csv'
 MODEL_FILE = 'xgboost_stage1_model.pkl'
 SCALER_FILE = 'feature_scaler.pkl'
 
@@ -39,13 +57,13 @@ MODEL_PATH = os.path.join(model_dir, MODEL_FILE)
 SCALER_PATH = os.path.join(model_dir, SCALER_FILE)
 
 VITAL_COLUMNS = ['HR', 'RR', 'SpO2', 'MAP']
-WINDOW_SIZE = 30 
+WINDOW_SIZE = 30
 OPTIMAL_THRESHOLD = 0.49 # Your threshold
 
-# --- 3. HELPER FUNCTIONS (No Changes) ---
+# --- 4. HELPER FUNCTIONS ---
 def calculate_features(window_df):
     """Calculates features for a single window."""
-    if len(window_df) < WINDOW_SIZE: return {} 
+    if len(window_df) < WINDOW_SIZE: return {}
     mean_hr = window_df['HR'].mean()
     median_hr = window_df['HR'].median()
     mean_map = window_df['MAP'].mean()
@@ -60,7 +78,7 @@ def calculate_features(window_df):
         features[f'{col}_std'] = window_df[col].std()
         features[f'{col}_min'] = window_df[col].min()
         features[f'{col}_max'] = window_df[col].max()
-        features[f'{col}_trend'] = last_hr - first_hr 
+        features[f'{col}_trend'] = last_hr - first_hr
     features['HR_diff_from_mean'] = last_hr - mean_hr
     features['HR_diff_from_median'] = last_hr - median_hr
     features['MAP_diff_from_mean'] = last_map - mean_map
@@ -102,7 +120,55 @@ def create_json_alert(patient_id, window_end_time, raw_data_window, prediction_p
     }
     return json_output
 
-# --- 4. LOAD MODELS ON STARTUP (No Changes) ---
+# --- UPDATED: LLM Analysis Function with Better Error Handling ---
+def get_llm_analysis(alert_json):
+    """Sends the alert JSON to the LLM and gets an analysis."""
+    if llm_model is None:
+        return "LLM analysis disabled. No API key found or configuration failed."
+
+    prompt = f"""
+    You are an expert ICU clinical assistant.
+    You have received the following JSON data from a patient monitoring system.
+    The system has detected a high-risk pattern.
+
+    JSON DATA:
+    {json.dumps(alert_json, indent=2)}
+
+    Analyze this data and provide a brief, actionable assessment for the attending nurse.
+    1. What is your primary concern (e.g., compensated shock, respiratory distress, potential sepsis, or false alarm)?
+    2. What is the key evidence (e.g., "MAP is falling while HR is rising")?
+    3. What is the recommended next step?
+
+    Keep your response 3-4 sentences long and start with "Assessment:".
+    """
+    try:
+        print("Sending request to LLM...") # Added print statement
+        response = llm_model.generate_content(prompt)
+        print("Received response from LLM.") # Added print statement
+        # Check if the response has text (sometimes it might return empty or blocked)
+        if hasattr(response, 'text') and response.text:
+            return response.text
+        else:
+            # Try accessing parts if text is missing (useful for debugging blocked content)
+            try:
+                # Check for safety ratings if available
+                if response.prompt_feedback.block_reason:
+                    reason = response.prompt_feedback.block_reason
+                    print(f"LLM Error: Request blocked due to {reason}")
+                    return f"Error: LLM request blocked ({reason}). The prompt might contain sensitive content."
+            except (AttributeError, IndexError):
+                 # If no block reason, it might just be an empty response
+                 pass # Fall through to generic error
+
+            print("LLM Error: Received empty response or response missing 'text' attribute.")
+            return "Error: Received an empty or malformed response from the LLM."
+
+    except Exception as e:
+        # Print the specific error from the API call
+        print(f"LLM API Error: {type(e).__name__}: {e}")
+        return f"Error: Could not get LLM analysis. API Error: {type(e).__name__}"
+
+# --- 5. LOAD MODELS ON STARTUP ---
 print("Loading model and scaler... This may take a moment.")
 try:
     model = joblib.load(MODEL_PATH)
@@ -116,26 +182,25 @@ except Exception as e:
     print(f"FATAL ERROR: Could not load model/scaler/data: {e}")
     model = None
 
-# --- 5. DEFINE WEB ROUTES ---
+# --- 6. DEFINE WEB ROUTES ---
 
 @app.route('/')
 def index():
-    return render_template('index.html') 
+    return render_template('index.html')
 
 @socketio.on('connect')
 def handle_connect():
     global snooze_is_active
-    snooze_is_active = False # Reset snooze on new connection
+    snooze_is_active = False
     print('Client connected')
 
 @socketio.on('stop_simulation')
 def handle_stop_simulation():
     global simulation_running, snooze_is_active
     simulation_running = False
-    snooze_is_active = False # Reset snooze on stop
+    snooze_is_active = False
     print("Simulation stop requested by client.")
 
-# --- NEW: Handler for the Snooze Button ---
 @socketio.on('snooze_clicked')
 def handle_snooze():
     """Called when the user clicks the 'Snooze' button."""
@@ -152,13 +217,13 @@ def handle_start_simulation():
     if simulation_running:
         print("Simulation already running.")
         return
-        
+
     simulation_running = True
     snooze_is_active = False # Reset snooze on start
-    
+
     print("Simulation requested... Starting loop.")
     socketio.emit('status_update', {'msg': 'Simulation started... Monitoring patient data.'})
-    
+
     triggered_alerts = 0
     patient_id = df_sim['patient_id'].iloc[0] if not df_sim.empty else "P-SIM-000"
 
@@ -169,15 +234,15 @@ def handle_start_simulation():
             socketio.emit('deactivate_alarm') # Hide snooze button
             socketio.emit('simulation_ended')
             break
-            
+
         if end_index < WINDOW_SIZE - 1:
             continue
-            
+
         start_index = end_index - WINDOW_SIZE + 1
         window_data = df_sim.iloc[start_index : end_index + 1].copy()
         current_vitals = window_data.iloc[-1]
         window_end_time = current_vitals['time']
-        
+
         vitals_data = {
             'time': window_end_time,
             'hr': float(current_vitals['HR']), 'map': float(current_vitals['MAP']),
@@ -189,10 +254,10 @@ def handle_start_simulation():
         features_dict = calculate_features(window_data)
         X_live = pd.DataFrame([features_dict])
         X_live['age'] = window_data['age'].iloc[-1]; X_live['bmi'] = window_data['bmi'].iloc[-1]
-        X_live['sex_encoded'] = 1 if window_data['sex'].iloc[-1] == 'M' else 0 
+        X_live['sex_encoded'] = 1 if window_data['sex'].iloc[-1] == 'M' else 0
         if 'sex' in X_live.columns: X_live = X_live.drop(columns=['sex'])
         X_live = X_live.reindex(columns=feature_cols_model, fill_value=0.0)
-        
+
         try:
             X_scaled = scaler.transform(X_live)
         except Exception as e:
@@ -201,31 +266,39 @@ def handle_start_simulation():
 
         # --- Prediction ---
         prediction_proba = model.predict_proba(X_scaled)[:, 1][0]
-        
-        # --- START OF UPGRADED SNOOZE LOGIC ---
+
+        # --- MODIFIED: LLM INTEGRATION LOGIC ---
         if prediction_proba >= OPTIMAL_THRESHOLD:
-            # High risk detected. Check if snoozed.
             if not snooze_is_active:
-                # Not snoozed. Fire the alert.
                 print(f"ALERT: Triggered at {window_end_time} (P: {prediction_proba:.4f})")
                 triggered_alerts += 1
+
+                # 1. Generate the JSON
                 alert_json = create_json_alert(
                     patient_id, window_end_time, window_data, prediction_proba
                 )
-                socketio.emit('new_alert', alert_json)
-                
-                # Tell the frontend to SHOW the snooze button
+
+                # 2. Get LLM Analysis
+                llm_response = get_llm_analysis(alert_json)
+
+                # 3. Create new payload
+                new_payload = {
+                    'alert_data': alert_json,
+                    'llm_analysis': llm_response
+                }
+
+                # 4. Emit the new event
+                socketio.emit('new_llm_alert', new_payload)
                 socketio.emit('activate_alarm')
         else:
-            # Patient risk has dropped. Automatically reset the snooze.
             if snooze_is_active:
                 print("Patient risk dropped. Resetting snooze.")
             snooze_is_active = False
-            # Tell the frontend to HIDE the snooze button
             socketio.emit('deactivate_alarm')
-        # --- END OF UPGRADED SNOOZE LOGIC ---
-            
-        socketio.sleep(0.5) # 500ms per row
+        # --- END OF MODIFICATION ---
+
+        # --- SLOWED DOWN SIMULATION SPEED ---
+        socketio.sleep(1.0) # 1000ms (1 second) per row
 
     if simulation_running:
         print(f"Simulation complete. Total alerts: {triggered_alerts}")
@@ -234,7 +307,7 @@ def handle_start_simulation():
         socketio.emit('simulation_ended')
         simulation_running = False
 
-# --- 6. RUN THE WEB SERVER ---
+# --- 7. RUN THE WEB SERVER ---
 if __name__ == '__main__':
     print("Starting Flask server... Open http://127.0.0.1:5000 in your browser.")
     socketio.run(app, host='0.0.0.0', port=5000)

@@ -13,7 +13,7 @@
             --color-text: #f0f0f0;
             --color-border: #444;
             --color-primary: #007bff;
-            --color-secondary: #17a2b8;
+            --color-secondary: #17a2b8; /* For 'Mark as Read' */
             --color-warn: #ffc107;
             --color-danger: #dc3545;
             --color-shadow: #0000004d;
@@ -61,7 +61,6 @@
         #stopButton:hover { background-color: #a71d2a; }
         #stopButton:disabled { background-color: #555; cursor: not-allowed; }
 
-        /* --- NEW SNOOZE BUTTON --- */
         #snoozeButton {
             background-color: var(--color-warn);
             color: #1a1a1a;
@@ -118,19 +117,35 @@
         .alert-card.RESP_DISTRESS_P-B h2 {
             color: var(--color-danger);
         }
-        .alert-details { display: flex; gap: 16px; }
-        .alert-details pre {
-            flex: 1;
+
+        /* --- NEW: Styles for LLM Response and "Mark as Read" --- */
+        .llm-response pre {
             background-color: var(--color-bg);
-            padding: 10px;
+            padding: 12px;
             border-radius: 6px;
             font-family: "Courier New", Courier, monospace;
-            font-size: 0.85em;
+            font-size: 1em; /* Make it readable */
             white-space: pre-wrap;
             word-wrap: break-word;
+            color: var(--color-text);
+        }
+        .mark-read-button {
+            background-color: var(--color-secondary);
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            margin-top: 10px;
+            width: 100%;
+        }
+        .mark-read-button:disabled {
+            background-color: #555;
+            color: #aaa;
+            cursor: not-allowed;
         }
 
-        /* --- Keyframes for pulsing snooze button --- */
         @keyframes fadeIn { to { opacity: 1; } }
         @keyframes pulse {
             0% { transform: scale(1); }
@@ -142,7 +157,7 @@
 <body>
 
     <header>
-        <h1>🩺 ICU Smart-Alert System</h1>
+        <h1>🩺 ICU Smart-Alert System (v2.0 with GenAI)</h1>
         <p>Live Patient Monitoring Simulation</p>
     </header>
 
@@ -150,7 +165,6 @@
         <div class="button-group">
             <button id="startButton" class="sim-button">Start Simulation</button>
             <button id="stopButton" class="sim-button" disabled>Stop Simulation</button>
-            
             <button id="snoozeButton" class="sim-button">SNOOZE ⏰</button>
         </div>
         <div id="status-text">Status: Idle.</div>
@@ -173,10 +187,13 @@
         // --- 2. GET REFERENCES TO HTML ELEMENTS ---
         const startButton = document.getElementById('startButton');
         const stopButton = document.getElementById('stopButton');
-        const snoozeButton = document.getElementById('snoozeButton'); // New
+        const snoozeButton = document.getElementById('snoozeButton'); 
         const statusText = document.getElementById('status-text');
         const clock = document.getElementById('clock');
         const alertsContainer = document.getElementById('alerts-container');
+        
+        // --- NEW: Global state for snooze dependency ---
+        let isAlertAcknowledged = true; // Start as true (no alert active)
 
         // --- 3. CHART.JS SETUP ---
         let charts = {};
@@ -259,7 +276,8 @@
             console.log("Starting simulation...");
             startButton.disabled = true;
             stopButton.disabled = false;
-            snoozeButton.style.display = 'none'; // Hide snooze
+            snoozeButton.style.display = 'none';
+            isAlertAcknowledged = true; // Reset
             statusText.textContent = "Status: Connecting...";
             alertsContainer.innerHTML = '';
             initCharts();
@@ -270,15 +288,39 @@
             console.log("Stopping simulation...");
             startButton.disabled = false;
             stopButton.disabled = true;
-            snoozeButton.style.display = 'none'; // Hide snooze
+            snoozeButton.style.display = 'none';
+            isAlertAcknowledged = true; // Reset
             socket.emit('stop_simulation');
         });
         
-        // --- NEW: SNOOZE BUTTON CLICK ---
         snoozeButton.addEventListener('click', () => {
+            // --- NEW: Check if alert is acknowledged ---
+            if (!isAlertAcknowledged) {
+                alert("You must 'Mark as Read' on the active alert before snoozing!");
+                return;
+            }
+            
             console.log("Snooze button clicked.");
-            snoozeButton.style.display = 'none'; // Hide self
+            snoozeButton.style.display = 'none';
             socket.emit('snooze_clicked');
+        });
+        
+        // --- NEW: Event Delegation for 'Mark as Read' ---
+        alertsContainer.addEventListener('click', (event) => {
+            if (event.target.classList.contains('mark-read-button')) {
+                console.log("Mark as Read clicked.");
+                
+                // 1. Set the global flag
+                isAlertAcknowledged = true;
+                
+                // 2. Update the button
+                const button = event.target;
+                button.disabled = true;
+                button.textContent = 'Acknowledged ✓';
+                
+                // 3. Optional: Change the card style to show it's read
+                button.closest('.alert-card').style.borderLeftColor = 'var(--color-secondary)';
+            }
         });
 
         // --- 5. SOCKET.IO EVENT HANDLERS ---
@@ -300,22 +342,29 @@
             console.log('Simulation finished or stopped.');
             startButton.disabled = false;
             stopButton.disabled = true;
-            snoozeButton.style.display = 'none'; // Hide snooze
+            snoozeButton.style.display = 'none';
+            isAlertAcknowledged = true; // Reset
             startButton.textContent = "Restart Simulation";
         });
         
-        // --- NEW: Handlers for showing/hiding snooze ---
         socket.on('activate_alarm', () => {
             snoozeButton.style.display = 'block';
+            isAlertAcknowledged = false; // A new, unread alert is active
         });
         
         socket.on('deactivate_alarm', () => {
             snoozeButton.style.display = 'none';
+            isAlertAcknowledged = true; // Alarm is no longer active
         });
 
-        socket.on('new_alert', (alertData) => {
-            console.log('New Alert Received:', alertData);
+        // --- MODIFIED: Listen for 'new_llm_alert' ---
+        socket.on('new_llm_alert', (payload) => {
+            console.log('New LLM Alert Received:', payload);
             
+            const alertData = payload.alert_data;
+            const llmAnalysis = payload.llm_analysis;
+
+            // Mark the point on the graph
             function markAlert(chart) {
                 chart.data.datasets.forEach(dataset => {
                     const lastIndex = dataset.pointBackgroundColor.length - 1;
@@ -328,27 +377,32 @@
             markAlert(charts.hrMap);
             markAlert(charts.rrSpo2);
 
+            // Create the new alert card
             const alertCard = document.createElement('div');
             alertCard.className = `alert-card ${alertData.pattern_detected}`;
-            const demographics = JSON.stringify(alertData.demographics, null, 2);
-            const trends = JSON.stringify(alertData.trigger_data_trends, null, 2);
+            
+            // Format the LLM response
+            const formattedAnalysis = llmAnalysis.replace(/\n/g, '<br>');
 
             alertCard.innerHTML = `
                 <h2>
-                    🚨 ALERT: ${alertData.pattern_description} (Risk: ${(alertData.risk_score_proba * 100).toFixed(1)}%)
+                    🚨 LLM ASSESSMENT (Risk: ${(alertData.risk_score_proba * 100).toFixed(1)}%)
                 </h2>
-                <p>
+                
+                <div class="llm-response">
+                    <pre>${llmAnalysis}</pre> </div>
+
+                <p style="font-size: 0.9em; color: #aaa; margin-top: 15px;">
                     <strong>Patient:</strong> ${alertData.patient_id} | 
                     <strong>Time:</strong> ${alertData.window_end_time}
                 </p>
-                <div class="alert-details">
-                    <pre><strong>Patient Info</strong>\n${demographics}</pre>
-                    <pre><strong>Trigger Trends</strong>\n${trends}</pre>
-                </div>
+                
+                <button class="mark-read-button">Mark as Read</button>
             `;
             alertsContainer.prepend(alertCard);
         });
 
+        // --- Initial Page Load ---
         initCharts();
         stopButton.disabled = true;
 
